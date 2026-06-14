@@ -68,6 +68,7 @@ class Args:
     post_process_action: bool = True
 
     with_state: str = "true"
+    action_chunk_size: int = 0  # 0=use config (full horizon); >0 = re-plan every N steps (closed-loop-ish)
 
     job_name: str = "test"
 
@@ -109,6 +110,7 @@ def eval_libero(args: Args) -> None:
         host=args.host,
         port=args.port,
         image_size=args.resize_size,
+        action_chunk_size=args.action_chunk_size,
     )
 
 

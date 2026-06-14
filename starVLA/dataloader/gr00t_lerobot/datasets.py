@@ -26,6 +26,7 @@ See `scripts/load_dataset.py` for examples on how to use these datasets.
 
 import hashlib
 import json
+import os
 from collections import defaultdict
 from pathlib import Path
 from typing import Sequence
@@ -1616,6 +1617,9 @@ class LeRobotMixtureDataset(Dataset):
                 action = np.concatenate(action, axis=1).astype(np.float16)
 
                 return_dict = dict(action=action, image=images, lang=language, video=videos)
+                # key for frozen-feature caches (e.g. precomputed Qwen action tokens)
+                _ds_name = os.path.basename(str(getattr(dataset, "dataset_path", dataset)))
+                return_dict["cache_key"] = f"{_ds_name}|{int(trajectory_name)}|{int(step)}"
                 if self.with_state:
                     state = []
                     for state_key in dataset.modality_keys["state"]:

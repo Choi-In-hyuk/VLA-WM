@@ -1,217 +1,133 @@
-<h3 align="center" style="font-size:48px; font-weight:bold; color:#9C276A; margin: 0;">
-  <a href="https://arxiv.org/abs/2602.10098" style="color:#9C276A; text-decoration: none;">
-    VLA-JEPA: Enhancing Vision-Language-Action Model with Latent World Model
-  </a>
+<h3 align="center" style="font-size:44px; font-weight:bold; color:#9C276A; margin: 0;">
+  VLA-WM: A Lightweight Mamba Latent World Model<br/>for Inference-Time Action Generation in VLA Models
 </h3>
 
 <div align="center">
 <p>
-  <a href="https://arxiv.org/abs/2602.10098">
-    <img src="https://img.shields.io/badge/Paper-PDF-orange.svg" alt="Paper PDF">
-  </a>
-  <a href="https://ginwind.github.io/VLA-JEPA/">
-    <img src="https://img.shields.io/badge/Project-Page-Green.svg" alt="Project Page">
-  </a>
-  <a href="https://huggingface.co/ginwind/VLA-JEPA">
-    <img src="https://img.shields.io/badge/🤗-Hugging_Face-yellow.svg" alt="Hugging Face">
-  </a>
-  <a href="https://github.com/tatsu-lab/stanford_alpaca/blob/main/LICENSE">
-    <img src="https://img.shields.io/badge/Code%20License-Apache_2.0-green.svg" alt="Code License">
-  </a>
+  <img src="https://img.shields.io/badge/Task-Vision--Language--Action-blue.svg" alt="VLA">
+  <img src="https://img.shields.io/badge/World%20Model-Mamba%20(SSM)-purple.svg" alt="Mamba">
+  <img src="https://img.shields.io/badge/Benchmark-LIBERO--10-green.svg" alt="LIBERO">
 </p>
 <p align="center">
-  ⭐ If our project helps you, please give us a star on GitHub to support us!
+  ⭐ If this project helps you, please give it a star!
 </p>
 </div>
 
-<div align="center">
-  <img src="assets/VLA-JEPA.png" width="90%" alt="VLA-JEPA overview" />
-</div>
-  
-<a id="table-of-contents"></a>
-## Table of Contents
-- [Table of Contents](#table-of-contents)
-- [🚧 TODO](#todo)
-- [⚙️ Environment Setup](#environment-setup)
-- [🔥 Training](#training)
-  - [0️⃣ Pretrained Model Preparation](#pretrained-model-preparation)
-  - [1️⃣ Data Preparation](#data-preparation)
-  - [2️⃣ Start Training](#start-training)
-  - [3️⃣ Optional: Custom Dataset Training](#optional-custom-dataset-training)
-- [📊 Evaluation](#evaluation)
-  - [LIBERO](#libero)
-  - [LIBERO-Plus](#libero-plus)
-  - [SimplerEnv](#simplerenv)
-- [🤝 Acknowledgement](#acknowledgement)
-- [📝 Citation](#citation)
-  
-<a id="todo"></a>
-## 🚧 TODO
-- [x] Partial training code
-- [x] LIBERO evaluation code
-- [x] LIBERO-Plus evaluation code
-- [x] SimplerEnv evaluation code
-- [x] Training codes for custom datasets
+---
 
-<a id="environment-setup"></a>
-## ⚙️ Environment Setup
+> **TL;DR.** VLA-JEPA trains a V-JEPA world model only as an auxiliary loss and
+> **drops it at inference**. We *revive the world model at inference time*: a
+> lightweight **Mamba (SSM)** latent world model — conditioned on **Qwen-VL's
+> language+visual intent** — predicts the future latent state, from which a
+> flow-matching head generates the action chunk. On LIBERO-10 this reaches
+> **88.4%** (V2 + Qwen-LoRA), near base-VLA-JEPA quality but with a *lightweight,
+> inference-time* world model. We also explore **unfreezing the DINO encoder and
+> learning it the V-JEPA way** (online + EMA + masking); see Results for an honest
+> account of when that helps and when it does not.
+
+This repository builds on [VLA-JEPA](https://arxiv.org/abs/2602.10098) and is a
+research extension, not the original release.
+
+## Key ideas
+
+1. **World model at inference (not just an auxiliary loss).** VLA-JEPA's V-JEPA
+   world model is dropped at test time; here the world model *is* the action
+   generator's conditioning at inference.
+2. **Lightweight Mamba instead of V-JEPA.** The heavy V-JEPA video encoder / ViT
+   predictor is replaced by light Mamba blocks operating on per-frame DINO
+   latents — fast enough for closed-loop control.
+3. **VLM-intent conditioning.** Qwen-VL's action tokens (its language+visual
+   understanding of *how the scene should change*) condition the future-latent
+   prediction.
+4. **Endpoint prediction + diffusion.** We predict the chunk-**endpoint** latent
+   `s_end` (a large, learnable change) rather than near-identical per-frame
+   latents, and a flow-matching head decomposes `(s_0 -> s_end)` into the action
+   chunk.
+5. **JEPA-trained encoder.** DINO is unfrozen and trained with the V-JEPA recipe
+   (online encoder + EMA target + context masking, latent prediction only), with
+   BYOL-style anti-collapse — yielding a task-specific latent space.
+
+## Method
 
 ```
-git clone https://github.com/ginwind/VLA-JEPA
-
-# Create conda environment
-conda create -n VLA_JEPA python=3.10 -y
-conda activate VLA_JEPA
-
-# Install requirements
-pip install -r requirements.txt
-
-# Install FlashAttention2
-pip install flash-attn --no-build-isolation
-
-# Install project
-pip install -e .
+                 ┌──────────── Qwen-VL (intent) ────────────┐
+ instruction ───►│ language + current-frame understanding   │── action tokens ─┐
+                 └──────────────────────────────────────────┘                  │
+                                                                                ▼
+ current frame ──► DINO encoder ──► s_0 ───────────────────────►  Mamba predictor ──► s_end
+                   (JEPA-trained)                                  (latent world model)   │
+                                                                                          ▼
+ robot state ───────────────────────────────►  Flow-matching head (s_0, s_end, state) ──► action chunk (H=7)
 ```
 
-This repository's code is based on the [starVLA](https://github.com/starVLA/starVLA).
+**Training (two stages).**
 
-<a id="training"></a>
-## 🔥 Training
+| Stage | Trains | Loss | Notes |
+|---|---|---|---|
+| `jepa` | online DINO + Mamba predictor (+ Qwen-LoRA) | `L_pred` only | EMA target encoder, context masking (~50%), BYOL-style anti-collapse (`s0_std` monitored) |
+| `stage2` | predictor (fine-tune) + flow-matching head (+ Qwen-LoRA) | `L_pred + L_action` | DINO frozen (the JEPA-learned one); head conditioned on the *predicted* `s_end` (inference-consistent) |
 
-<a id="pretrained-model-preparation"></a>
-### 0️⃣ Pretrained Model Preparation
-Download the [Qwen3-VL-2B](https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct) and the [V-JEPA2 encoder](https://huggingface.co/facebook/vjepa2-vitl-fpc64-256).  
+**Inference.** `current frame → DINO → s_0`; `(s_0, Qwen tokens) → Mamba → s_end`;
+`(s_0, s_end, state) → flow-matching head → action chunk`. The world model is run
+every control cycle.
 
-<a id="data-preparation"></a>
-### 1️⃣ Data Preparation
+## Results (LIBERO-10, 50 trials/task = 500 episodes)
 
-Download the following datasets:
+LIBERO-10 is the hardest suite (long-horizon, multi-step).
 
-- [ssv2](https://huggingface.co/datasets/morpheushoc/something-something-v2)
-- [Droid](https://huggingface.co/datasets/IPEC-COMMUNITY/droid_lerobot)
-- [LIBERO](https://huggingface.co/collections/IPEC-COMMUNITY/libero-benchmark-dataset)
-- [BridgeV2](https://huggingface.co/datasets/IPEC-COMMUNITY/bridge_orig_lerobot)
-- [Fractal](https://huggingface.co/datasets/IPEC-COMMUNITY/fractal20220817_data_lerobot)
+| Model | Encoder | Inference WM | Success |
+|---|---|---|---|
+| V1 — per-frame + inverse dynamics | DINO (frozen) | ✅ | 20% |
+| V2 — endpoint + diffusion | DINO (frozen) | ✅ | 84.8% |
+| **V2 + Qwen-LoRA** *(best)* | DINO (frozen) | ✅ | **88.4%** |
+| VLA-WM — V2 + JEPA-DINO + LoRA | DINO (JEPA-trained) | ✅ | 84.8% |
+| *(ref)* base VLA-JEPA | V-JEPA | ❌ (dropped) | ~90%+ |
 
-For robot datasets, you need to add a `modality.json` file under the `meta/` subdirectory of each LeRobot dataset. The `modality.json` files for LIBERO, BridgeV2, Fractal, and Droid are provided under `./examples` (BridgeV2 and Fractal are under `./examples/SimplerEnv`).
+*Single-seed; LIBERO action sampling is non-deterministic (≈±2% at 500 episodes).*
 
-<a id="start-training"></a>
-### 2️⃣ Start Training
-Depending on whether you are conducting pre-training or post-training, select the appropriate training script and YAML configuration file from the [`/scripts`](./scripts) directory.
+**Takeaways.**
+- **Endpoint + diffusion is the key jump** (V1 20% → V2 84.8%): predicting the
+  chunk-endpoint latent (a large change) instead of near-identical per-frame
+  latents makes the transition learnable.
+- **Qwen-LoRA helps** (84.8% → 88.4%, +3.6%, z≈1.7): re-optimizing the action
+  tokens for the Mamba/DINO space, vs. their original V-JEPA-tube target.
+- **JEPA-training the encoder did *not* help here** (84.8%). The encoder fits the
+  prediction task well (`pred_cos` ≈ 0.98, `s0_std` stable ~1.4 → no collapse),
+  but the learned latent space did not translate into better actions for this
+  single seed — a case where a better *representation* objective does not improve
+  the *policy*. Whether this is a real regression or seed noise needs multi-seed
+  evaluation. The best configuration remains **V2 + Qwen-LoRA (88.4%)**, reaching
+  near base-VLA-JEPA quality **with a lightweight, inference-time world model**.
 
-Ensure the following configurations are updated in the YAML file:
-- `framework.qwenvl.basevlm` and `framework.vj2_model.base_encoder` should be set to the paths of your respective checkpoints.
-- Update `datasets.vla_data.data_root_dir`, `datasets.video_data.video_dir`, and `datasets.video_data.text_file` to match the paths of your datasets.
+## Code map
 
-Once the configurations are updated, you can proceed to start the training process.
+| Path | What |
+|---|---|
+| [`starVLA/model/framework/VLA_DINO_Mamba_JEPA.py`](starVLA/model/framework/VLA_DINO_Mamba_JEPA.py) | **VLA-WM**: online DINO + EMA target + masking (JEPA stage) |
+| [`starVLA/model/framework/VLA_DINO_Mamba_Diff.py`](starVLA/model/framework/VLA_DINO_Mamba_Diff.py) | V2: endpoint predictor + flow-matching head |
+| [`starVLA/model/framework/VLA_DINO_Mamba.py`](starVLA/model/framework/VLA_DINO_Mamba.py) | V1: per-frame + inverse dynamics baseline |
+| [`starVLA/model/modules/world_model/mamba_world_model.py`](starVLA/model/modules/world_model/mamba_world_model.py) | Mamba state encoder / predictor / inverse-dynamics head |
+| [`scripts/train_mamba_wm.py`](scripts/train_mamba_wm.py) | Trainer (`--stage jepa\|predictor\|stage2`, `--qwen_lora`) |
+| [`scripts/run_2stage_dino_jepa.sh`](scripts/run_2stage_dino_jepa.sh) | VLA-WM two-stage chain (jepa → stage2) |
+| [`scripts/eval_libero_dino.sh`](scripts/eval_libero_dino.sh) | LIBERO eval (server + rollout) |
+| [`RESEARCH.md`](RESEARCH.md) | Full design notes, decisions, failure analysis |
 
-<a id="optional-custom-dataset-training"></a>
-### 3️⃣ Optional: Custom Dataset Training
-VLA-JEPA supports training on both robot datasets and human video datasets. You can run custom training by specifying robot data and/or human videos in your configuration.
+## Quick start
 
-- **Robot Data:** We support training with datasets in the LeRobot v2.1 format. Convert your custom robot dataset to LeRobot v2.1 first.
-  - Define a custom robot dataset config class in [`data_config.py`](./starVLA/dataloader/gr00t_lerobot/data_config.py) (its video-key fields should match the values predefined in `modality.json`; see [`modality.json`](./examples/Droid/modality.json)), and add a mapping from `robot_type` to the config class in `ROBOT_TYPE_CONFIG_MAP`.
-  - `robot_type` is specified by `DATASET_NAMED_MIXTURES` in [`mixtures.py`](./starVLA/dataloader/gr00t_lerobot/mixtures.py): the dict key corresponds to `datasets.vla_data.data_mix` in the YAML training config, and the value is a tuple of sub-datasets. Each sub-dataset tuple contains three items: subdirectory, version, and `robot_type`. The `robot_type` selects the corresponding config for state/action normalization and other field alignment.
-  - Finally, update the YAML config accordingly and launch training.
-
-- **Human Video:** You can implement your own DataLoader and update the mapping from `dataset_py` to a dataloader in `build_dataloader` within [`./starVLA/dataloader/__init__.py`](./starVLA/dataloader/__init__.py). Alternatively, use our video dataloader and configure `datasets.video_data` in the YAML file:
-  - dataset_py: use our video dataloader (no change needed)
-  - video_dir: directory that contains video files; each file is named by its `index`, and the suffix is controlled by `extensions`
-  - text_file: a headerless CSV where the first column is `index` and the second column is the video text description
-  - CoT_prompt: prompt template for latent-action training (no change needed)
-  - extensions: list of video file extensions
-
-
-
-<a id="evaluation"></a>
-## 📊 Evaluation
-
-Download the model checkpoints from Hugging Face: https://huggingface.co/ginwind/VLA-JEPA
-
-**Environment:** Install the required Python packages into your `VLA-JEPA` environment:
 ```bash
-pip install tyro matplotlib mediapy websockets msgpack
-pip install numpy==1.24.4
+# Train VLA-WM (JEPA-DINO stage -> action stage), both with Qwen-LoRA
+bash scripts/run_2stage_dino_jepa.sh
+
+# Evaluate on LIBERO-10 (50 trials/task)
+bash scripts/eval_libero_dino.sh libero_10 50 18012 \
+  results/dino_mamba_jepa_libero_10/stage2/checkpoints/mamba_wm_final.pt jepa50 0
 ```
 
-<a id="libero"></a>
-### LIBERO
+Backbone checkpoint, datasets, and LIBERO setup follow the base VLA-JEPA repo;
+paths are configurable in the scripts.
 
-- **LIBERO setup:** Prepare the LIBERO benchmark in a separate conda environment following the official LIBERO instructions: https://github.com/Lifelong-Robot-Learning/LIBERO
+## Acknowledgement
 
-- **Configuration:** In the downloaded checkpoint folder, update `config.json` and `config.yaml` to point the following fields to your local checkpoints:
-  - `framework.qwenvl.basevlm`: path to the Qwen3-VL-2B checkpoint
-  - `framework.vj2_model.base_encoder`: path to the V-JEPA encoder checkpoint
-
-- **Evaluation script:** Edit [`examples/LIBERO/eval_libero.sh`](./examples/LIBERO/eval_libero.sh) and set the `LIBERO_HOME` environment variable (line 4) to your local LIBERO code path, and set the `sim_python` variable (line 9) to the Python executable of the LIBERO conda environment. Finally, set the `your_ckpt` variable (line 11) to the path of the downloaded `LIBERO/checkpoints/VLA-JEPA-LIBERO.pt`.
-
-- **Run evaluation:** Launch the evaluation (the script runs the four task suites in parallel across 4 GPUs):
-```bash
-bash ./examples/LIBERO/eval_libero.sh
-```
-
-<a id="libero-plus"></a>
-### LIBERO-Plus
-
-
-- **LIBERO-Plus setup:** Clone the LIBERO-Plus repository: https://github.com/sylvestf/LIBERO-plus. In [`./examples/LIBERO-Plus/libero_plus_init.py`](./examples/LIBERO-Plus/libero_plus_init.py), update line 121 to point to your `LIBERO-Plus/libero/libero/benchmark/task_classification.json`. Replace the original `LIBERO-Plus/libero/libero/benchmark/__init__.py` with the provided modified implementation (see [`./examples/LIBERO-Plus/libero_plus_init.py`](./examples/LIBERO-Plus/libero_plus_init.py)) to enable evaluation over perturbation dimensions. Finally, follow the official LIBERO-Plus installation instructions and build the benchmark in a separate conda environment.
-
-- **Configuration:** In the downloaded checkpoint folder, update `config.json` and `config.yaml` to point the following fields to your local checkpoints:
-  - `framework.qwenvl.basevlm`: path to the Qwen3-VL-2B checkpoint
-  - `framework.vj2_model.base_encoder`: path to the V-JEPA encoder checkpoint
-
-- **Evaluation script:** Edit [`examples/LIBERO-Plus/eval_libero_plus.sh`](./examples/LIBERO-Plus/eval_libero_plus.sh) and set the `LIBERO_HOME` environment variable (line 4) to your local LIBERO-Plus code path, and set the `sim_python` variable (line 9) to the Python executable of the LIBERO-Plus conda environment. Finally, set the `your_ckpt` variable (line 11) to the path of the downloaded `LIBERO/checkpoints/VLA-JEPA-LIBERO.pt`.
-
-- **Run evaluation:** Launch the evaluation (the script runs the seven pertubation dimensions in parallel across 7 GPUs):
-```bash
-bash ./examples/LIBERO-Plus/eval_libero_plus.sh
-```
-
-<a id="simplerenv"></a>
-### SimplerEnv
-
-- **SimplerEnv setup:** Clone the SimplerEnv repository: https://github.com/simpler-env/SimplerEnv and follow the official SimplerEnv installation instructions and build the benchmark in a separate conda environment.
-
-- **Configuration:** In the downloaded checkpoint folder, update `config.json` and `config.yaml` to point the following fields to your local checkpoints:
-  - `framework.qwenvl.basevlm`: path to the Qwen3-VL-2B checkpoint
-  - `framework.vj2_model.base_encoder`: path to the V-JEPA encoder checkpoint
-
-- **Evaluation script:** Edit [`examples/SimplerEnv/eval_files/auto_eval_scripts/batch_evaluate.sh`](examples/SimplerEnv/eval_files/auto_eval_scripts/batch_evaluate.sh) and set the `SimplerEnv_PATH` environment variable to your local SimplerEnv code path, and set the `sim_python` variable to the Python executable of the SimplerEnv conda environment. Finally, set the `MODEL_PATH` variable to the path of the downloaded `SimplerEnv/checkpoints/VLA-JEPA-Simpler.pt`.
-
-- **Run evaluation:** Launch the evaluation:
-```bash
-bash examples/SimplerEnv/eval_files/auto_eval_scripts/batch_evaluate.sh
-```
-
-- **Compute success rates:** After the previous step, SimplerEnv will generate evaluation rollout videos for each sub-task. You can then compute task success rates with [`examples/SimplerEnv/eval_files/auto_eval_scripts/calc_success_rate.sh`](examples/SimplerEnv/eval_files/auto_eval_scripts/calc_success_rate.sh) as follows:
-```bash
-# <task_suite> must be one of: pick_coke_can | move_near | drawer | long_horizon_apple_in_drawer | bridge_put_on.
-# Note: bridge_put_on corresponds to the WidowX robot evaluation; the other four correspond to the Google Robot evaluation.
-# <model_path> is the path to `VLA-JEPA-Simpler.pt`, and <log_dir> is the root directory that contains the generated videos
-# (by default, this is saved under `./results` within the evaluation output directory).
-bash ./examples/SimplerEnv/eval_files/auto_eval_scripts/calc_success_rate.sh <task_suite> <model_path> <log_dir>
-```
-
-**Notes:** Ensure each process has access to a GPU and verify that all checkpoint paths in the configuration files are correct before running the evaluation. For LIBERO, we evaluate the 4 task suites in parallel on 4 GPUs. For LIBERO-Plus and SimplerEnv, we run evaluations in parallel on 8 GPUs. If you have fewer GPUs available, modify the parallelization logic in the launch scripts accordingly.
-
-
-<a id="acknowledgement"></a>
-## 🤝 Acknowledgement
-
-We extend our sincere gratitude to the [starVLA](https://github.com/starVLA/starVLA) project and the [V-JEPA2](https://github.com/facebookresearch/vjepa2) project for their invaluable open-source contributions.
-
-<a id="citation"></a>
-## 📝 Citation
-
-If you find our code or models useful in your work, please cite [our paper](https://arxiv.org/abs/2602.10098):
-```
-@misc{vlajepa2026,
-          title={VLA-JEPA: Enhancing Vision-Language-Action Model with Latent World Model}, 
-          author={Jingwen Sun and Wenyao Zhang and Zekun Qi and Shaojie Ren and Zezhi Liu and Hanxin Zhu and Guangzhong Sun and Xin Jin and Zhibo Chen},
-          year={2026},
-          eprint={2602.10098},
-          archivePrefix={arXiv},
-          primaryClass={cs.RO},
-          url={https://arxiv.org/abs/2602.10098}, 
-    }
-```
+Built on [VLA-JEPA](https://arxiv.org/abs/2602.10098). World model uses
+[Mamba](https://github.com/state-spaces/mamba); encoder is
+[DINOv2](https://github.com/facebookresearch/dinov2); VLM is Qwen3-VL.

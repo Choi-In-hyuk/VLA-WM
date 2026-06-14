@@ -1,0 +1,32 @@
+# --- training / eval artifacts (never commit; results/ is ~89GB) ---
+results/
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+dataset_statistics.json
+
+# --- logs / temp ---
+*.log
+/tmp/
+wandb/
+nohup.out
+
+# --- caches ---
+**/__pycache__/
+*.py[cod]
+*.egg-info/
+.cache/
+*.dat
+*.memmap
+
+# --- data (kept outside repo at /home/choi/data) ---
+data/
+datasets/
+
+# --- editor / OS ---
+.vscode/
+.idea/
+.DS_Store
+.ipynb_checkpoints/

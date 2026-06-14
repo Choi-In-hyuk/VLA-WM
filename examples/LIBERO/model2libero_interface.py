@@ -30,6 +30,7 @@ class M1Inference:
         adaptive_ensemble_alpha = 0.1,
         host="0.0.0.0",
         port=10095,
+        action_chunk_size: Optional[int] = None,   # override #actions executed before re-planning
     ) -> None:
         
         # build client to connect server policy
@@ -60,6 +61,9 @@ class M1Inference:
 
         self.action_norm_stats = self.get_action_stats(self.unnorm_key, policy_ckpt_path=policy_ckpt_path)
         self.action_chunk_size = self.get_action_chunk_size(policy_ckpt_path=policy_ckpt_path)
+        if action_chunk_size:   # override: re-plan more often (model still predicts full horizon)
+            self.action_chunk_size = action_chunk_size
+            print(f"*** action_chunk_size overridden to {action_chunk_size} (re-plan every {action_chunk_size} steps) ***")
         
 
     def _add_image_to_history(self, image: np.ndarray) -> None:
