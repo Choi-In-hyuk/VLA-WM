@@ -17,6 +17,7 @@ def make_LeRobotSingleDataset(
     delete_pause_frame: bool = False,
     action_horizon: int = 7,
     video_horizon: int = 16,
+    obs_indices: list = None,
 ) -> LeRobotSingleDataset:
     """
     Make a LeRobotSingleDataset object.
@@ -25,11 +26,14 @@ def make_LeRobotSingleDataset(
     :param data_name: The name of the dataset.
     :param robot_type: The robot type config to use.
     :param crop_obs_camera: Whether to crop the observation camera images.
+    :param obs_indices: explicit observation delta indices (may be negative, e.g. a
+        past buffer [-6..0, 7]); negatives are auto first-frame-padded at episode start.
+        Defaults to list(range(video_horizon)).
     :return: A LeRobotSingleDataset object.
     """
     data_config_cls = ROBOT_TYPE_CONFIG_MAP[robot_type]
     data_config = data_config_cls(
-        observation_indices=list(range(video_horizon)),
+        observation_indices=obs_indices if obs_indices is not None else list(range(video_horizon)),
         action_indices=list(range(action_horizon))
     )
     modality_config = data_config.modality_config()
@@ -58,10 +62,14 @@ def get_vla_dataset(
     delete_pause_frame: bool = True,
     action_horizon: int = 7,
     video_horizon: int = 16,
+    obs_indices: list = None,
     **kwargs: dict,
 ) -> LeRobotMixtureDataset:
     """
     Get a LeRobotMixtureDataset object.
+
+    obs_indices: explicit observation delta indices (may include negatives for a past
+    buffer, e.g. [-6..0, 7]). Overrides video_horizon when given.
     """
     data_root_dir = data_cfg.data_root_dir
     data_mix = data_cfg.data_mix
@@ -81,9 +89,10 @@ def get_vla_dataset(
         dataset_mixture.append((make_LeRobotSingleDataset(Path(data_root_dir), 
                                                           d_name, 
                                                           robot_type, 
-                                                          delete_pause_frame=delete_pause_frame, 
+                                                          delete_pause_frame=delete_pause_frame,
                                                           action_horizon=action_horizon,
-                                                          video_horizon=video_horizon), d_weight))
+                                                          video_horizon=video_horizon,
+                                                          obs_indices=obs_indices), d_weight))
 
     return LeRobotMixtureDataset(
         dataset_mixture,

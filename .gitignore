@@ -30,3 +30,6 @@ datasets/
 .idea/
 .DS_Store
 .ipynb_checkpoints/
+
+# transient experiment queue scripts
+scripts/_wait_*.sh

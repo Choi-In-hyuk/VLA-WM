@@ -47,6 +47,7 @@ def build_cfg(args):
         "dino_backbone": args.dino_backbone,
         "mask_ratio": args.mask_ratio,            # jepa: fraction of s_0 tokens hidden
         "ema_momentum": args.ema_momentum,        # jepa: EMA target-encoder momentum (->1.0)
+        "train_dino": args.train_dino,            # A-b: unfreeze DINO in stage2
     })
     return cfg
 
@@ -68,6 +69,10 @@ def main():
                    help="predictor: train Mamba predictor (L_pred); id/stage2: train action head "
                         "(stage2 = VLA_DINO_Mamba_Diff: predictor fine-tune + diffusion head); "
                         "jepa: VLA_DINO_Mamba_JEPA stage-1 (online DINO + EMA target + masking, L_pred); joint: all")
+    p.add_argument("--jepa_dino", default=None,
+                   help="V3-b: checkpoint with JEPA-trained 'dino.*' weights to load into the encoder")
+    p.add_argument("--train_dino", action="store_true",
+                   help="A-b: unfreeze DINO in stage2 (action-anchored, detached target)")
     p.add_argument("--mask_ratio", type=float, default=0.5, help="jepa: fraction of s_0 tokens hidden")
     p.add_argument("--ema_momentum", type=float, default=0.996, help="jepa: EMA target momentum (cosine ->1.0)")
     p.add_argument("--resume_ckpt", default=None,
@@ -107,6 +112,8 @@ def main():
         cfg.framework.mamba_wm.qwen_lora = True
         cfg.framework.mamba_wm.lora_r = args.lora_r
         cfg.framework.mamba_wm.lora_alpha = args.lora_alpha
+    if args.jepa_dino:                             # V3-b: load JEPA-trained DINO encoder weights
+        model.load_jepa_dino(args.jepa_dino)
     if args.qwen_cache and not args.qwen_lora:
         model.load_qwen_cache(args.qwen_cache)
     elif args.qwen_cache and args.qwen_lora:
@@ -136,9 +143,12 @@ def main():
         shutil.copy(src_dir / "dataset_statistics.json", out / "dataset_statistics.json")
 
     # ---- data
+    # frameworks may request explicit obs delta indices (e.g. VLA_DINO_Mamba_Temporal's past
+    # buffer [-(K-1)..0, horizon]); else default to obs_0..obs_H (H+1 frames).
+    obs_indices = getattr(model, "obs_indices", None)
     dataset = get_vla_dataset(
-        # only obs_0..obs_H are used (H+1 frames); decoding fewer frames ~halves dataloader cost
-        data_cfg=cfg.datasets.vla_data, action_horizon=model.horizon, video_horizon=model.horizon + 1,
+        data_cfg=cfg.datasets.vla_data, action_horizon=model.horizon,
+        video_horizon=model.horizon + 1, obs_indices=obs_indices,
     )
     loader = DataLoader(
         dataset, batch_size=args.batch_size, shuffle=True,

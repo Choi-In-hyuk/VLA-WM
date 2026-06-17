@@ -77,6 +77,9 @@ class VLA_DINO_Mamba_Diff(VLA_JEPA):
         self.register_buffer("dino_std", torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1), persistent=False)
         self._qwen_cache = None
         self._qwen_lora = False
+        # A-b (MambaVLA-style encoder learning): unfreeze DINO in stage2 only, anchored by the
+        # action loss; the L_pred TARGET (s_end_gt) is detached -> no collapse (no EMA needed).
+        self.train_dino = bool(get("train_dino", False))
         # eval/from_pretrained path: re-apply LoRA so the saved LoRA state_dict matches.
         # (training applies LoRA via the trainer AFTER load_backbone, with qwen_lora absent here.)
         if get("qwen_lora", False):
@@ -128,6 +131,11 @@ class VLA_DINO_Mamba_Diff(VLA_JEPA):
         for m in train:
             for p in m.parameters():
                 p.requires_grad_(True)
+        if self.train_dino and stage == "stage2":   # A-b: unfreeze encoder (action-anchored)
+            for p in self.dino.parameters():
+                p.requires_grad_(True)
+            self.dino.train()
+            logger.info("[set_stage] train_dino=True -> DINO unfrozen (stage2, action-anchored)")
         self._set_qwen_lora_trainable(True)   # Qwen LoRA trains in BOTH stages
         logger.info(f"[set_stage] stage={stage} loss_weights={self.loss_weights} qwen_lora={self._qwen_lora}")
         return self
@@ -164,7 +172,14 @@ class VLA_DINO_Mamba_Diff(VLA_JEPA):
 
     @torch.no_grad()
     def _dino_latents(self, frames):
-        """frames: [B,V,T,H,W,3] uint8 -> [B,T, V*tok, dim]."""
+        """frames: [B,V,T,H,W,3] uint8 -> [B,T, V*tok, dim]. Frozen (no grad)."""
+        return self._dino_latents_impl(frames)
+
+    def _dino_latents_grad(self, frames):
+        """Grad-enabled DINO encode (A-b: train the encoder)."""
+        return self._dino_latents_impl(frames)
+
+    def _dino_latents_impl(self, frames):
         B, V, T, H, W, _ = frames.shape
         x = frames.float() / 255.0
         x = x.permute(0, 1, 2, 5, 3, 4).reshape(B * V * T, 3, H, W)
@@ -208,8 +223,14 @@ class VLA_DINO_Mamba_Diff(VLA_JEPA):
         frames = videos[:, :, [0, self.endpoint]]            # frame 0 and frame H
 
         with torch.autocast("cuda", dtype=torch.float32):
-            s = self._dino_latents(frames).float()           # [B,2,N,D]
-        s_0, s_end_gt = s[:, 0], s[:, 1]
+            if self.train_dino and self.loss_weights["action"] > 0:
+                # A-b: encode s_0 WITH grad (encoder learns via action anchor); the L_pred
+                # target s_end_gt stays no-grad + detached -> action-grounded, collapse-free.
+                s_0 = self._dino_latents_grad(frames[:, :, [0]]).float()[:, 0]
+                s_end_gt = self._dino_latents(frames[:, :, [1]]).float()[:, 0].detach()
+            else:
+                s = self._dino_latents(frames).float()       # [B,2,N,D]
+                s_0, s_end_gt = s[:, 0], s[:, 1]
 
         w = self.loss_weights
         need_tokens = True   # predictor always needs action tokens

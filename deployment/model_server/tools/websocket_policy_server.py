@@ -105,6 +105,8 @@ class WebsocketPolicyServer:
                 }
             try:
                 payload["batch_images"] = image_tools.to_pil_preserve(payload["batch_images"])
+                if payload.get("image_buffer") is not None:   # V3 temporal buffer: convert each frame
+                    payload["image_buffer"] = [image_tools.to_pil_preserve(f) for f in payload["image_buffer"]]
                 ouput_dict = self._policy.predict_action(**payload)
             except Exception as e:
                 logging.exception("Policy inference error (request_id=%s)", req_id)

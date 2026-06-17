@@ -73,6 +73,9 @@ class M1Inference:
     def reset(self, task_description: str) -> None:
         self.task_description = task_description
         self.image_history.clear()
+        # V3 temporal world model: consecutive per-step frame buffer (multiview lists),
+        # sent to the server every re-plan so DINO sees a consecutive past window.
+        self._frame_buffer = deque(maxlen=getattr(self, "temporal_buffer_len", 7))
         if self.action_ensemble:
             self.action_ensembler.reset()
         self.num_image_history = 0
@@ -117,8 +120,19 @@ class M1Inference:
         if state is not None:
             vla_input["state"] = [state]  # add batch dim
         
+        # append the current multiview frame every step -> consecutive buffer (V3)
+        if not hasattr(self, "_frame_buffer"):
+            self._frame_buffer = deque(maxlen=getattr(self, "temporal_buffer_len", 7))
+        self._frame_buffer.append(images)
+
         action_chunk_size = self.action_chunk_size
         if step % action_chunk_size == 0:
+            # send the last K consecutive frames (oldest..current), left-padded by
+            # replicating the earliest available frame at episode start (cold-start).
+            K = self._frame_buffer.maxlen
+            buf = list(self._frame_buffer)
+            buf = [buf[0]] * (K - len(buf)) + buf
+            vla_input["image_buffer"] = [[frame] for frame in buf]  # each -> batch_images style [sample]
             response = self.client.infer(vla_input)
             # unnormalize the action
             # import ipdb; ipdb.set_trace()

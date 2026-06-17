@@ -53,7 +53,22 @@
 > **#2 (DINO-JEPA) 결과 — 개선 없음.** 인코더가 예측 task엔 잘 적응(pred_cos 0.98,
 > s0_std ~1.4 안정 = collapse 없음)했으나, **단일 시드에서 액션 성공률은 84.8%로 V2+LoRA(88.4)에 못 미침.**
 > "표현 목적이 좋아져도 정책이 안 좋아지는" 전형. 진짜 회귀인지 시드 노이즈인지는 multi-seed 필요.
-> 베스트는 여전히 **V2+LoRA (88.4%)**. → 다음은 [[research-direction-mamba-wm-inverse-dynamics]]의 시간-버퍼(V3) 방향.
+
+### 진행 중 / 추가 실험
+
+- **V3 (시간-버퍼 월드모델)** — `VLA_DINO_Mamba_Temporal`: 과거 7프레임 latent를 Mamba에 시간 시퀀스로
+  넣어 동역학(모션) 인코딩, 끝점 s_{t+7} 예측 유지. 추론은 매 스텝 DINO 임베딩→연속 버퍼(cold-start는
+  음수 delta 자동 첫프레임 패딩). **V3-a(frozen DINO), V3-b(JEPA-DINO)** 학습 완료했으나 **action loss가
+  0.028/0.045로 best(0.0115)보다 2.4~3.9배 높아** 학습 loss 기준 기각(eval 생략). 실패 원인이 동역학이
+  아니라 추론/진행상황(웹조사: LaRA/PALM)이라는 해석과 일치.
+- **A (학습량↑, MambaVLA 통찰: 간단한 구조 + 많은 학습)** — `run_A_longtrain.sh` / `run_A_b_liberoall.sh`:
+  - **A-a**: V2+LoRA 구조 동일, **step 15k→40k** (libero_10, DINO frozen). *진행 중* — stage1 pred_cos
+    0.878→**0.905**, stage2 action loss **0.0087 < best 0.0115** (학습 loss로 best 갱신, eval 대기).
+  - **A-b**: + DINO 인코더 학습(action-anchored + 타깃 detach → EMA 없이 collapse-free), **libero_all
+    4-suite, 60k** (인코더 학습엔 데이터 다양성 필요). *큐 대기*.
+
+> 베스트는 (eval 기준) 여전히 **V2+LoRA (88.4%)**. A-a가 학습 loss로 best를 갱신 → "학습량이 병목"
+> 가설을 지지(eval로 확정 예정). 그리퍼는 **바이너리(0/1)**, 추론 시 0.5 임계로 이진화.
 
 - **V1 20% → V2 84.8%**: per-frame "작은 변화" 문제(50ms DINO latent 거의 동일 → 액션 효과 묻힘)를
   **끝점 예측(큰 변화) + diffusion 헤드(표현력)** 로 해결. ← 핵심 도약.

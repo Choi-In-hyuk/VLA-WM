@@ -178,6 +178,58 @@ class MambaStatePredictor(nn.Module):
         return q_out
 
 
+class MambaTemporalPredictor(nn.Module):
+    """Endpoint predictor over a SEQUENCE of past latents (V3, temporal buffer).
+
+    Unlike MambaStatePredictor (which sees a single current frame -> the Mamba is
+    only a spatial mixer), this consumes a length-`context_len` buffer of past
+    per-frame latents [s_{t-K+1}, ..., s_t] laid out as a TIME-then-space sequence,
+    so Mamba's causal recurrence actually integrates motion across frames. It then
+    predicts the single chunk-ENDPOINT latent s_{t+H} (one query block), keeping
+    V2's large-change target (avoids V1's per-frame small-change problem).
+
+    Sequence: [action_tokens | frame_0 (N) | ... | frame_{K-1} (N) | query (N)]
+    Each past frame gets a per-frame temporal embedding; the query reads out s_end.
+    """
+
+    def __init__(self, state_dim: int = 768, action_token_dim: int = 2048,
+                 tokens_per_frame: int = 512, context_len: int = 7, depth: int = 8,
+                 **mamba_kwargs):
+        super().__init__()
+        self.tokens_per_frame = tokens_per_frame
+        self.context_len = context_len
+        self.state_dim = state_dim
+
+        self.action_proj = nn.Linear(action_token_dim, state_dim)
+        self.frame_pos = nn.Parameter(torch.zeros(1, context_len, 1, state_dim))  # per-frame time emb
+        self.spatial_pos = nn.Parameter(torch.zeros(1, 1, tokens_per_frame, state_dim))
+        self.query = nn.Parameter(torch.zeros(1, tokens_per_frame, state_dim))
+        for p in (self.frame_pos, self.spatial_pos, self.query):
+            nn.init.trunc_normal_(p, std=0.02)
+
+        self.blocks = nn.ModuleList(
+            [MambaBlock(state_dim, bidirectional=False, **mamba_kwargs) for _ in range(depth)]
+        )
+        self.norm = RMSNorm(state_dim)
+        self.out_proj = nn.Linear(state_dim, state_dim)
+
+    def forward(self, buffer: torch.Tensor, action_tokens: torch.Tensor) -> torch.Tensor:
+        """buffer: [B, K, N, D] past latents (oldest..current), action_tokens: [B, Na, Da]
+        -> s_end: [B, N, D] (the predicted chunk-endpoint latent)."""
+        B, K, N, D = buffer.shape
+        assert K == self.context_len, f"expected context_len={self.context_len}, got {K}"
+        a = self.action_proj(action_tokens)                       # [B, Na, D]
+        ctx = buffer + self.frame_pos + self.spatial_pos          # [B, K, N, D]
+        ctx = ctx.reshape(B, K * N, D)                            # time-then-space
+        q = self.query.expand(B, -1, -1)                          # [B, N, D]
+        seq = torch.cat([a, ctx, q], dim=1)                      # [B, Na+K*N+N, D]
+        for blk in self.blocks:
+            seq = blk(seq)
+        seq = self.norm(seq)
+        s_end = self.out_proj(seq[:, a.shape[1] + K * N:, :])    # [B, N, D]
+        return s_end
+
+
 class InverseDynamicsHead(nn.Module):
     """Recover the action that drives one latent transition s_t -> s_{t+1}.
 
