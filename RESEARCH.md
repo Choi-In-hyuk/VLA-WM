@@ -46,8 +46,9 @@
 |---|---|---|
 | V1 | per-frame s₁..s₇ + 학습된 IDM | **20%** (4/20) |
 | V2 | **끝점 s_end + diffusion 헤드** | **84.8%** (424/500, 50 trials) |
-| **V2 + Qwen LoRA** *(best)* | + Qwen LoRA(attn, r16) | **88.4%** (442/500, 50 trials) |
-| #2 (VLA-WM) | + DINO를 JEPA식 학습(online+EMA+마스킹) | **84.8%** (424/500, 50 trials) |
+| V2 + Qwen LoRA (15k) | + Qwen LoRA(attn, r16) | **88.4%** (442/500) |
+| **A-a: V2+LoRA, 40k step** *(best)* | 구조 동일, 학습량 2.7배↑ | **89.0%** (445/500) |
+| #2 | DINO를 JEPA식 학습(online+EMA+마스킹) | 84.8% (424/500) |
 | (참고) base VLA-JEPA | 원본 (full) | ~90%+ |
 
 > **#2 (DINO-JEPA) 결과 — 개선 없음.** 인코더가 예측 task엔 잘 적응(pred_cos 0.98,
@@ -62,13 +63,22 @@
   0.028/0.045로 best(0.0115)보다 2.4~3.9배 높아** 학습 loss 기준 기각(eval 생략). 실패 원인이 동역학이
   아니라 추론/진행상황(웹조사: LaRA/PALM)이라는 해석과 일치.
 - **A (학습량↑, MambaVLA 통찰: 간단한 구조 + 많은 학습)** — `run_A_longtrain.sh` / `run_A_b_liberoall.sh`:
-  - **A-a**: V2+LoRA 구조 동일, **step 15k→40k** (libero_10, DINO frozen). *진행 중* — stage1 pred_cos
-    0.878→**0.905**, stage2 action loss **0.0087 < best 0.0115** (학습 loss로 best 갱신, eval 대기).
-  - **A-b**: + DINO 인코더 학습(action-anchored + 타깃 detach → EMA 없이 collapse-free), **libero_all
-    4-suite, 60k** (인코더 학습엔 데이터 다양성 필요). *큐 대기*.
+  - **A-a**: V2+LoRA 구조 동일, **step 15k→40k** (libero_10, frozen). 학습 loss 개선(action
+    0.0092<0.0115, pred_cos 0.916>0.890), **eval 89.0% (445/500)**.
+  - **A-b**: + DINO 인코더 학습(action-anchored + detach → EMA 없이 collapse-free), libero_all 4-suite, 60k. *진행 중*.
 
-> 베스트는 (eval 기준) 여전히 **V2+LoRA (88.4%)**. A-a가 학습 loss로 best를 갱신 → "학습량이 병목"
-> 가설을 지지(eval로 확정 예정). 그리퍼는 **바이너리(0/1)**, 추론 시 0.5 임계로 이진화.
+> ### 결론: 학습량은 병목이 아니다
+> 학습량 2.7배↑(15k→40k)에도 **88.4% → 89.0% (+0.6%, 단일시드 노이즈 ±2% 내)**. 학습 loss는 개선됐지만
+> 성공률 천장은 ~89%. → **병목은 학습량이 아니라 *모델링(구조/표현/추론)*.** 구조 변경(#2 인코더학습, V3
+> 시간버퍼)도 실패했고, 학습량↑도 소폭. **천장 ~89%를 뚫으려면 다른 모델링이 필요.**
+> 웹조사(LaRA 97.9%, PALM) 시사점: 실패 모드(멀티스텝 2번째 grasp)의 원인은 **추론/진행상황 인지 부재**.
+> 그리퍼는 **바이너리(0/1)**, 추론 시 0.5 임계.
+
+### 다음 — "더 나은 모델링" 후보 (논의 중)
+- **progress/subtask 인지**(PALM식 aux loss) — 실패 모드 정조준, 가벼움.
+- **latent reasoning**(LaRA식) — Qwen intent를 *고정 조건*이 아니라 *추론*으로; 우리는 EMA·visual latent
+  pred·flow head를 이미 보유.
+- **조건 효율화** — cross-attn 조건이 1024토큰(s_0 512 + s_end 512); 준정적이라 중복. 델타/풀링으로 압축.
 
 - **V1 20% → V2 84.8%**: per-frame "작은 변화" 문제(50ms DINO latent 거의 동일 → 액션 효과 묻힘)를
   **끝점 예측(큰 변화) + diffusion 헤드(표현력)** 로 해결. ← 핵심 도약.
