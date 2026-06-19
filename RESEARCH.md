@@ -51,6 +51,29 @@
 | #2 | DINO를 JEPA식 학습(online+EMA+마스킹) | 84.8% (424/500) |
 | (참고) base VLA-JEPA | 원본 (full) | ~90%+ |
 
+### LIBERO-PRO 일반화 평가 (2026-06-18, A-a 베스트, 20 trials/task)
+
+> 암기 vs 진짜 일반화 측정 (PRO: SOTA들이 원본 0.9+ → perturbation 0.0 붕괴).
+
+| suite | 성공률 | 진단 |
+|---|---|---|
+| 원본 libero_10 | **90.5%** | baseline |
+| **lan** (언어 변경) | **87.5%** | ✅ **언어 일반화 강함** (우리 구조 강점!) |
+| object (물체 교체) | 45.5% | 부분 일반화 |
+| **task** (task 변경) | 8.5% | 💥 task 이해 약함 |
+| **swap** (위치 교환) | **0.0%** | 💥 **위치 완전 암기** |
+
+> **핵심 발견 1 — 언어 일반화 강점 (87.5%):** SOTA들은 lan에서도 무너지는데 우리는 거의 유지.
+> "Qwen intent + 미래예측" 구조가 명령을 *외우지 않고 이해*함 → 선생님 thesis 일부 입증, contribution 후보.
+>
+> **핵심 발견 2 — 위치 일반화 실패 = 데이터 한계 (BDDL 확인):** swap 0%는 모델 결함이 아니라
+> **학습 데이터가 위치 다양성이 없어서**임. 원본 libero_10 BDDL의 물체 init region 폭이 **2~5cm**
+> (book: x폭0.02 y폭0.02, mug: 5cm)뿐 — 각 물체가 *고정 위치 ±노이즈*에서만 등장 → 어떤 모델이든
+> 위치를 암기할 수밖에 없음(SOTA도 다 0%). swap은 두 물체의 init_region을 맞바꿈(학습 때 못 본 위치).
+> → **개선 목표: 위치 일반화.** 방법 = BDDL로 물체 위치/배치를 다양화한 증강 데이터셋 구축
+> (충돌 피하려고 물체끼리 위치 swap한 여러 BDDL 생성). 또는 visual grounding(언어→현재 화면 물체).
+> 스크립트: `eval_libero_pro.sh`, `eval_pro_perturb.sh` (eval_libero.py에서 libero_10* suite 허용 패치).
+
 > **#2 (DINO-JEPA) 결과 — 개선 없음.** 인코더가 예측 task엔 잘 적응(pred_cos 0.98,
 > s0_std ~1.4 안정 = collapse 없음)했으나, **단일 시드에서 액션 성공률은 84.8%로 V2+LoRA(88.4)에 못 미침.**
 > "표현 목적이 좋아져도 정책이 안 좋아지는" 전형. 진짜 회귀인지 시드 노이즈인지는 multi-seed 필요.
